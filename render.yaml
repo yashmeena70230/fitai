@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: fitai
+    rootDir: fitai-github-upload
+    runtime: node
+    plan: starter
+    buildCommand: node scripts/build.mjs
+    startCommand: node server.js
+    healthCheckPath: /api/health
+    disk:
+      name: fitai-data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_VERSION
+        value: 24.21.0
+      - key: NODE_ENV
+        value: production
+      - key: DATA_DIR
+        value: /opt/render/project/src/data
+      - key: SKIP_INSTALL_DEPS
+        value: "true"

@@ -1,0 +1,40 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { createServer } from 'node:net';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { fileURLToPath } from 'node:url';
+
+const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
+function freePort(){return new Promise((resolve,reject)=>{const s=createServer();s.once('error',reject);s.listen(0,'127.0.0.1',()=>{const port=s.address().port;s.close(e=>e?reject(e):resolve(port));});});}
+async function waitReady(base,child){for(let i=0;i<100;i++){if(child.exitCode!==null)throw new Error(`FitAI exited with ${child.exitCode}: ${child.fitaiOutput}`);try{const r=await fetch(base+'/api/health');if(r.ok)return;}catch{}await new Promise(r=>setTimeout(r,50));}throw new Error(`FitAI server did not become ready: ${child.fitaiOutput}`);}
+function launch(port,dataDir){const child=spawn(process.execPath,[path.join(root,'server.js')],{cwd:root,env:{...process.env,PORT:String(port),DATA_DIR:dataDir,NODE_ENV:'production',OPENAI_API_KEY:'',OPENAI_MODEL:'gpt-6-astra'},stdio:['ignore','pipe','pipe']});child.fitaiOutput='';child.stdout.on('data',chunk=>child.fitaiOutput+=chunk);child.stderr.on('data',chunk=>child.fitaiOutput+=chunk);return child;}
+async function stop(child){if(!child||child.exitCode!==null)return;child.kill('SIGTERM');await Promise.race([new Promise(r=>child.once('exit',r)),new Promise(r=>setTimeout(r,1500))]);if(child.exitCode===null)child.kill('SIGKILL');}
+async function request(base,route,{method='GET',cookie,body,origin}={}){const headers={};if(cookie)headers.Cookie=cookie;if(body!==undefined)headers['Content-Type']='application/json';if(origin)headers.Origin=origin;const response=await fetch(base+route,{method,headers,body:body===undefined?undefined:JSON.stringify(body)});let data={};try{data=await response.json()}catch{}const cookieHeader=response.headers.get('set-cookie');return{response,data,cookie:cookieHeader?.match(/fitai_session=[^;]+/)?.[0]||cookie};}
+
+test('multi-user auth, private persistence, API validation, coach honesty, and PWA shell',async t=>{
+  const dataDir=await fs.mkdtemp(path.join(os.tmpdir(),'fitai-data-')),port=await freePort(),base=`http://127.0.0.1:${port}`;let child=launch(port,dataDir);t.after(async()=>{await stop(child);await fs.rm(dataDir,{recursive:true,force:true});});await waitReady(base,child);
+  let unauth=await request(base,'/api/state');assert.equal(unauth.response.status,401);
+  const users=[];
+  for(let i=0;i<10;i++){const result=await request(base,'/api/auth/register',{method:'POST',body:{name:`Athlete ${i}`,email:`athlete${i}@example.com`,password:'safe-test-password-2026'}});assert.equal(result.response.status,201);assert.ok(result.cookie);assert.match(result.response.headers.get('set-cookie'),/HttpOnly/i);assert.match(result.response.headers.get('set-cookie'),/SameSite=Lax/i);assert.match(result.response.headers.get('set-cookie'),/Secure/i);users.push({email:`athlete${i}@example.com`,cookie:result.cookie,state:result.data.state});}
+  const duplicate=await request(base,'/api/auth/register',{method:'POST',body:{name:'Duplicate',email:users[0].email,password:'safe-test-password-2026'}});assert.equal(duplicate.response.status,409);
+  let profile=await request(base,'/api/profile',{method:'PUT',cookie:users[0].cookie,body:{age:28,height:170,weight:70,level:'Intermediate',goal:'Strength',location:'Gym',days:4,duration:45,equipment:'Barbell',limitations:'No overhead pressing'}});assert.equal(profile.response.status,200);assert.equal(profile.data.profile.goal,'Strength');
+  let workout=await request(base,'/api/workouts',{method:'POST',cookie:users[0].cookie,body:{plan:'Upper Body Strength',duration:42,sets:[{exercise:'Row',weight:40,reps:10},{exercise:'Press',weight:30,reps:8}]}});assert.equal(workout.response.status,201);assert.equal(workout.data.volume,640);
+  let measurement=await request(base,'/api/measurements',{method:'POST',cookie:users[0].cookie,body:{weight:69.6}});assert.equal(measurement.response.status,201);
+  let own=await request(base,'/api/state',{cookie:users[0].cookie});assert.equal(own.response.status,200);assert.equal(own.data.state.sessions.length,1);assert.equal(own.data.state.measurements.length,1);assert.equal(own.data.state.profile.goal,'Strength');
+  assert.equal((await request(base,'/api/workouts',{cookie:users[0].cookie})).data.sessions.length,1);assert.equal((await request(base,'/api/measurements',{cookie:users[0].cookie})).data.measurements.length,1);
+  const invalidProfile=await request(base,'/api/profile',{method:'PUT',cookie:users[0].cookie,body:{level:'Beginner',goal:'General Fitness',location:'Gym',days:9,duration:30}});assert.equal(invalidProfile.response.status,400);
+  const invalidWorkout=await request(base,'/api/workouts',{method:'POST',cookie:users[0].cookie,body:{plan:'Empty',duration:30,sets:[]}});assert.equal(invalidWorkout.response.status,400);
+  for(let i=1;i<10;i++){const other=await request(base,'/api/state',{cookie:users[i].cookie});assert.equal(other.response.status,200);assert.equal(other.data.state.sessions.length,0);assert.equal(other.data.state.measurements.length,0);assert.notEqual(other.data.state.user.id,users[0].state.user.id);}
+  const coach=await request(base,'/api/coach',{method:'POST',cookie:users[0].cookie,body:{message:'Make me a workout'}});assert.equal(coach.response.status,503);assert.match(coach.data.error,/OPENAI_API_KEY/);
+  const badOrigin=await request(base,'/api/profile',{method:'PUT',cookie:users[0].cookie,origin:'https://attacker.example',body:{}});assert.equal(badOrigin.response.status,403);
+  const html=await fetch(base+'/');assert.equal(html.status,200);const page=await html.text();assert.match(page,/rel="manifest"/);assert.doesNotMatch(page,/onclick=|onkeydown=/i);assert.match(page,/authForm/);const manifest=await fetch(base+'/manifest.webmanifest');assert.equal(manifest.status,200);const pwa=await manifest.json();assert.equal(pwa.display,'standalone');assert.equal(pwa.start_url,'/');assert.equal(pwa.icons.length,2);const worker=await fetch(base+'/service-worker.js');assert.equal(worker.status,200);assert.match(await worker.text(),/startsWith\('\/api\/'\)/);assert.equal((await fetch(base+'/icon-192.png')).status,200);assert.equal((await fetch(base+'/icon-512.png')).status,200);assert.equal((await fetch(base+'/styles.css')).status,200);assert.equal((await fetch(base+'/app.js')).status,200);
+  await stop(child);child=null;child=launch(port,dataDir);await waitReady(base,child);
+  const login=await request(base,'/api/auth/login',{method:'POST',body:{email:users[0].email,password:'safe-test-password-2026'}});assert.equal(login.response.status,200);assert.doesNotMatch(JSON.stringify(login.data),/password_hash|safe-test-password-2026/i);const afterRestart=await request(base,'/api/state',{cookie:login.cookie});assert.equal(afterRestart.data.state.sessions.length,1);assert.equal(afterRestart.data.state.sessions[0].volume,640);assert.equal(afterRestart.data.state.measurements[0].weight,69.6);
+  const wrongPassword=await request(base,'/api/auth/login',{method:'POST',body:{email:users[0].email,password:'wrong-password'}});assert.equal(wrongPassword.response.status,401);
+  const db=new DatabaseSync(path.join(dataDir,'fitai.sqlite'));const row=db.prepare('SELECT salt,password_hash FROM users WHERE email=?').get(users[0].email);assert.ok(row.salt.length>=32);assert.equal(row.password_hash.length,128);assert.notEqual(row.password_hash,'safe-test-password-2026');assert.notEqual(db.prepare('SELECT token_hash FROM auth_sessions WHERE user_id=?').get(users[0].state.user.id).token_hash,users[0].cookie.slice('fitai_session='.length));assert.equal(db.prepare('SELECT COUNT(*) AS n FROM users').get().n,10);db.close();
+  const logout=await request(base,'/api/auth/logout',{method:'POST',cookie:login.cookie,body:{}});assert.equal(logout.response.status,200);assert.equal((await request(base,'/api/auth/me',{cookie:login.cookie})).data.state,null);
+});
