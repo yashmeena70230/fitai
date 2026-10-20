@@ -1,17 +1,12 @@
 {
-  "$schema": "https://openapi.vercel.sh/vercel.json",
-  "framework": null,
-  "buildCommand": "",
-  "outputDirectory": "public",
-  "headers": [
-    {
-      "source": "/(.*)",
-      "headers": [
-        { "key": "X-Content-Type-Options", "value": "nosniff" },
-        { "key": "Referrer-Policy", "value": "strict-origin-when-cross-origin" },
-        { "key": "Content-Security-Policy", "value": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'" }
-      ]
-    },
-    { "source": "/(sw|service-worker).js", "headers": [{ "key": "Cache-Control", "value": "no-cache" }] }
-  ]
+  "name": "fitai-personal-trainer",
+  "version": "1.1.0",
+  "private": true,
+  "description": "Installable FitAI personal training web app (PWA) with private accounts. Runs on Vercel + Turso.",
+  "dependencies": {
+    "@libsql/client": "^0.14.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
 }
