@@ -193,7 +193,16 @@ async function coach(req, res, user) {
 // ---------- Routes ----------
 async function api(req, res) {
   const route = new URL(req.url, 'http://localhost').pathname.replace(/\/$/, '');
-  if (req.method === 'GET' && route === '/api/health') return send(res, 200, { ok: true });
+  if (req.method === 'GET' && route === '/api/health') {
+  if (!req.url.includes('db=1')) return send(res, 200, { ok: true });
+  try {
+    await init();
+    const r = await get('SELECT 1 AS ok');
+    return send(res, 200, { ok: true, db: r });
+  } catch (e) {
+    return send(res, 200, { ok: false, dbError: String(e.message).slice(0, 300) });
+  }
+}
   if (!originOk(req)) return fail(res, 403, 'Request origin is not allowed.');
   if (!process.env.TURSO_DATABASE_URL) return fail(res, 500, 'Database is not configured. Add TURSO_DATABASE_URL and TURSO_AUTH_TOKEN in Vercel settings.');
   await init();
