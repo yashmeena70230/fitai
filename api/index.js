@@ -111,9 +111,8 @@ async function stateFor(user) {
   return { user, profile: await profileFor(user.id), sessions, measurements };
 }
 
-function cleanProfile(raw) {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Profile details are required.');
-  const b = { ...raw, days: Number(raw.days), duration: Number(raw.duration) };
+function cleanProfile(b) {
+  if (!b || typeof b !== 'object' || Array.isArray(b)) throw new Error('Profile details are required.');
   const allowed = {
     level: ['Beginner', 'Intermediate', 'Advanced'],
     goal: ['Muscle Gain', 'Fat Loss', 'Strength', 'General Fitness'],
@@ -160,33 +159,49 @@ async function saveSession(req, res, user) {
 }
 
 async function coach(req, res, user) {
-  if (!process.env.OPENAI_API_KEY) return fail(res, 503, 'The coach is not connected yet. Add OPENAI_API_KEY to the server settings.');
+  const apiKey = process.env.AI_API_KEY;
+  if (!apiKey) return fail(res, 503, 'The coach is not connected yet. Add AI_API_KEY in the Vercel settings.');
+  const baseUrl = (process.env.AI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta/openai').replace(/\/$/, '');
+  const model = process.env.AI_MODEL || 'gemini-2.5-flash';
+
   const now = Date.now(), recent = (coachLimits.get(user.id) || []).filter((t) => now - t < 60 * 60_000);
   if (recent.length >= 20) return fail(res, 429, 'You have reached the hourly coach limit. Try again later.');
   recent.push(now); coachLimits.set(user.id, recent);
+
   const b = await body(req);
   const message = String(b.message || '').trim().slice(0, 1500);
   if (!message) return fail(res, 400, 'Write a question for your coach.');
-  const history = Array.isArray(b.history) ? b.history.slice(-8).map((x) => ({ role: x.role === 'assistant' ? 'assistant' : 'user', content: String(x.content || '').slice(0, 1200) })) : [];
+  const history = Array.isArray(b.history)
+    ? b.history.slice(-8).map((x) => ({ role: x.role === 'assistant' ? 'assistant' : 'user', content: String(x.content || '').slice(0, 1200) }))
+    : [];
+
   const p = (await profileFor(user.id)) || {};
-  const context = { level: p.level || 'Beginner', goal: p.goal || 'General Fitness', location: p.location || 'Gym', daysPerWeek: p.days || 3, minutesPerSession: p.duration || 30, equipment: p.equipment || 'Not specified', limitations: p.limitations || 'Not specified' };
+  const workouts = await all('SELECT plan,duration,completed_sets,volume,created_at FROM workouts WHERE user_id=? ORDER BY id DESC LIMIT 5', [user.id]);
+  const context = {
+    level: p.level || 'Beginner', goal: p.goal || 'General Fitness', location: p.location || 'Gym',
+    daysPerWeek: p.days || 3, minutesPerSession: p.duration || 30,
+    equipment: p.equipment || 'Not specified', limitations: p.limitations || 'Not specified',
+    recentWorkouts: workouts.map((w) => ({ plan: w.plan, minutes: w.duration, sets: w.completed_sets, volumeKg: Math.round(w.volume), date: String(w.created_at).slice(0, 10) })),
+  };
+  const system = `You are FitAI, a careful and friendly exercise coach. The user's profile and recent workouts: ${JSON.stringify(context)}. Give practical, beginner-safe training guidance with exercises, sets, reps, rest and modifications when asked for workouts. Keep answers short and clear. Do not diagnose injuries, prescribe treatment, or encourage extreme dieting. If they mention pain or a medical condition, advise stopping the painful movement and consulting a qualified health professional. Be clear that advice is general fitness guidance.`;
+
   let response;
   try {
-    response = await fetch('https://api.openai.com/v1/responses', {
+    response = await fetch(`${baseUrl}/chat/completions`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
       signal: AbortSignal.timeout(35_000),
-      body: JSON.stringify({
-        model: process.env.OPENAI_MODEL || 'gpt-6-astra', store: false,
-        instructions: `You are FitAI, a careful exercise coach. Use this user's profile when relevant: ${JSON.stringify(context)}. Give practical, beginner-safe training guidance with exercises, sets, reps, rest and modifications when asked for workouts. Do not diagnose injuries, prescribe treatment, or encourage extreme dieting. If they mention pain or a medical condition, advise stopping the painful movement and consulting a qualified health professional. Be clear that advice is general fitness guidance.`,
-        input: [...history, { role: 'user', content: message }],
-      }),
+      body: JSON.stringify({ model, max_tokens: 900, messages: [{ role: 'system', content: system }, ...history, { role: 'user', content: message }] }),
     });
   } catch { return fail(res, 502, 'The coach service could not be reached. Try again shortly.'); }
-  if (!response.ok) { console.error('Coach provider error:', response.status, (await response.text()).slice(0, 600)); return fail(res, 502, 'The coach service returned an error. Check the server API settings.'); }
+
+  if (!response.ok) {
+    console.error('Coach provider error:', response.status, (await response.text()).slice(0, 600));
+    if (response.status === 429) return fail(res, 429, 'The free AI limit was reached for now. Try again in a minute.');
+    return fail(res, 502, 'The coach service returned an error. Check AI_API_KEY and AI_MODEL in Vercel.');
+  }
   const result = await response.json();
-  let text = result.output_text || '';
-  if (!text && Array.isArray(result.output)) text = result.output.flatMap((o) => o.content || []).filter((c) => c.type === 'output_text').map((c) => c.text).join('\n');
+  const text = result?.choices?.[0]?.message?.content || '';
   if (!text) return fail(res, 502, 'The coach did not return a reply. Try again.');
   return send(res, 200, { reply: text });
 }
@@ -194,16 +209,7 @@ async function coach(req, res, user) {
 // ---------- Routes ----------
 async function api(req, res) {
   const route = new URL(req.url, 'http://localhost').pathname.replace(/\/$/, '');
-  if (req.method === 'GET' && route === '/api/health') {
-  if (!req.url.includes('db=1')) return send(res, 200, { ok: true });
-  try {
-    await init();
-    const r = await get('SELECT 1 AS ok');
-    return send(res, 200, { ok: true, db: r });
-  } catch (e) {
-    return send(res, 200, { ok: false, dbError: String(e.message).slice(0, 300) });
-  }
-}
+  if (req.method === 'GET' && route === '/api/health') return send(res, 200, { ok: true });
   if (!originOk(req)) return fail(res, 403, 'Request origin is not allowed.');
   if (!process.env.TURSO_DATABASE_URL) return fail(res, 500, 'Database is not configured. Add TURSO_DATABASE_URL and TURSO_AUTH_TOKEN in Vercel settings.');
   await init();
