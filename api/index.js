@@ -111,8 +111,9 @@ async function stateFor(user) {
   return { user, profile: await profileFor(user.id), sessions, measurements };
 }
 
-function cleanProfile(b) {
-  if (!b || typeof b !== 'object' || Array.isArray(b)) throw new Error('Profile details are required.');
+function cleanProfile(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Profile details are required.');
+  const b = { ...raw, days: Number(raw.days), duration: Number(raw.duration) };
   const allowed = {
     level: ['Beginner', 'Intermediate', 'Advanced'],
     goal: ['Muscle Gain', 'Fat Loss', 'Strength', 'General Fitness'],
