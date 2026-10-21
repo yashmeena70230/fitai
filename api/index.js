@@ -189,16 +189,20 @@ async function coach(req, res, user) {
   try {
     response = await fetch(`${baseUrl}/chat/completions`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      headers: { Authorization: `Bearer ${apiKey}`, 'x-goog-api-key': apiKey, 'Content-Type': 'application/json' },
       signal: AbortSignal.timeout(35_000),
       body: JSON.stringify({ model, max_tokens: 900, messages: [{ role: 'system', content: system }, ...history, { role: 'user', content: message }] }),
     });
   } catch { return fail(res, 502, 'The coach service could not be reached. Try again shortly.'); }
 
   if (!response.ok) {
-    console.error('Coach provider error:', response.status, (await response.text()).slice(0, 600));
+    const raw = (await response.text()).slice(0, 600);
+    console.error('Coach provider error:', response.status, raw);
     if (response.status === 429) return fail(res, 429, 'The free AI limit was reached for now. Try again in a minute.');
-    return fail(res, 502, 'The coach service returned an error. Check AI_API_KEY and AI_MODEL in Vercel.');
+    let detail = raw;
+    try { const j = JSON.parse(raw); detail = (Array.isArray(j) ? j[0] : j)?.error?.message || raw; } catch {}
+    detail = String(detail).replace(/AQ\.[\w.-]+|AIza[\w-]+/g, '[key]').slice(0, 220);
+    return fail(res, 502, `Coach error ${response.status} (model: ${model}): ${detail}`);
   }
   const result = await response.json();
   const text = result?.choices?.[0]?.message?.content || '';
