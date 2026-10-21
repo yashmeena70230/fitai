@@ -185,20 +185,28 @@ async function coach(req, res, user) {
   };
   const system = `You are FitAI, a careful and friendly exercise coach. The user's profile and recent workouts: ${JSON.stringify(context)}. Give practical, beginner-safe training guidance with exercises, sets, reps, rest and modifications when asked for workouts. Keep answers short and clear. Do not diagnose injuries, prescribe treatment, or encourage extreme dieting. If they mention pain or a medical condition, advise stopping the painful movement and consulting a qualified health professional. Be clear that advice is general fitness guidance.`;
 
+  const payload = JSON.stringify({ model, max_tokens: 900, messages: [{ role: 'system', content: system }, ...history, { role: 'user', content: message }] });
+  const callModel = () => fetch(`${baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${apiKey}`, 'x-goog-api-key': apiKey, 'Content-Type': 'application/json' },
+    signal: AbortSignal.timeout(20_000),
+    body: payload,
+  });
   let response;
   try {
-    response = await fetch(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${apiKey}`, 'x-goog-api-key': apiKey, 'Content-Type': 'application/json' },
-      signal: AbortSignal.timeout(35_000),
-      body: JSON.stringify({ model, max_tokens: 900, messages: [{ role: 'system', content: system }, ...history, { role: 'user', content: message }] }),
-    });
+    response = await callModel();
+    // Temporary overload (503) or rate limit (429): wait a moment and retry up to 2 more times.
+    for (let i = 0; i < 2 && (response.status === 503 || response.status === 429); i++) {
+      await new Promise((r) => setTimeout(r, 1500 * (i + 1)));
+      response = await callModel();
+    }
   } catch { return fail(res, 502, 'The coach service could not be reached. Try again shortly.'); }
 
   if (!response.ok) {
     const raw = (await response.text()).slice(0, 600);
     console.error('Coach provider error:', response.status, raw);
     if (response.status === 429) return fail(res, 429, 'The free AI limit was reached for now. Try again in a minute.');
+    if (response.status === 503) return fail(res, 503, 'The AI service is busy right now. Please try again in a minute.');
     let detail = raw;
     try { const j = JSON.parse(raw); detail = (Array.isArray(j) ? j[0] : j)?.error?.message || raw; } catch {}
     detail = String(detail).replace(/AQ\.[\w.-]+|AIza[\w-]+/g, '[key]').slice(0, 220);
